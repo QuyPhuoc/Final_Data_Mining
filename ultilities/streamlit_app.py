@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from vnstock import Vnstock
 import os
 import numpy as np
+import plotly.graph_objects as go
 
 # Import mô-đun báo cáo thống kê tự động nâng cao
 from ydata_profiling import ProfileReport
@@ -19,6 +19,7 @@ st.set_page_config(page_title="Data Mining Pipeline - Phase 1 Advanced", layout=
 def fetch_raw_data(ticker_symbol: str, source: str) -> pd.DataFrame:
     """
     Hàm gọi API kết nối sàn giao dịch lấy dữ liệu thô gốc và đồng bộ hóa Schema.
+    Mới: Cập nhật cấu trúc Vnstock 4.x dùng Quote Engine.
     """
     ticker_clean = ticker_symbol.strip().upper()
     
@@ -39,9 +40,12 @@ def fetch_raw_data(ticker_symbol: str, source: str) -> pd.DataFrame:
         
     elif source == "Vnstock (Chứng khoán Việt Nam)":
         try:
-            stock = Vnstock().stock(symbol=ticker_clean, source='VCI')
-            df_raw = stock.quote.history(start='2010-01-01', end='2026-12-31')
-        except Exception:
+            # Di trú sang cú pháp object-oriented mới của Vnstock 4.x
+            from vnstock.api.quote import Quote
+            q = Quote(symbol=ticker_clean, source='VCI')
+            df_raw = q.history(start='2010-01-01', end='2026-12-31')
+        except Exception as e:
+            # Cơ chế dự phòng (Fallback) nếu môi trường chưa đồng bộ
             from vnstock import stock_historical_data
             df_raw = stock_historical_data(symbol=ticker_clean, start_date='2010-01-01', end_date='2026-12-31', resolution='1D', type='stock')
             
@@ -78,7 +82,7 @@ def fetch_raw_data(ticker_symbol: str, source: str) -> pd.DataFrame:
 
 def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Tự động trích xuất các đặc trưng chỉ báo kỹ thuật cơ bản
+    Tự động trích xuất các đặc trưng chỉ báo kỹ thuật cơ bản bổ trợ cho mô hình ML.
     """
     df = df.copy()
     df['Log_Return'] = np.log(df['Close'] / df['Close'].shift(1))
@@ -98,7 +102,7 @@ def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def process_and_split_pipeline(df: pd.DataFrame, start_year: int, end_year: int, train_ratio: float, val_ratio: float, ticker: str, output_dir: str = "../data") -> tuple:
     """
-    Hàm cắt lọc thời gian, phân chia Train/Validation/Test theo chuỗi thời gian tuyến tính và ghi tệp CSV cục bộ.
+    Hàm cắt lọc thời gian, phân chia Train/Validation/Test theo dòng thời gian tuyến tính và ghi tệp CSV.
     """
     df['Year'] = df['Date'].dt.year
     df_filtered = df[(df['Year'] >= start_year) & (df['Year'] <= end_year)].copy()
@@ -107,12 +111,10 @@ def process_and_split_pipeline(df: pd.DataFrame, start_year: int, end_year: int,
     if df_filtered.empty:
         raise ValueError(f"Không có dữ liệu của mã {ticker} trong giai đoạn {start_year} - {end_year}.")
     
-    # Tính toán điểm cắt dòng thời gian dựa trên tỷ lệ được phân bổ
     total_len = len(df_filtered)
     train_end_idx = int(total_len * train_ratio)
     val_end_idx = int(total_len * (train_ratio + val_ratio))
     
-    # Phân chia dữ liệu theo đúng trình tự thời gian
     df_train = df_filtered.iloc[:train_end_idx].copy()
     df_val = df_filtered.iloc[train_end_idx:val_end_idx].copy()
     df_test = df_filtered.iloc[val_end_idx:].copy()
@@ -126,7 +128,6 @@ def process_and_split_pipeline(df: pd.DataFrame, start_year: int, end_year: int,
     val_path = os.path.abspath(os.path.join(output_dir, f"{ticker_clean}_val.csv"))
     test_path = os.path.abspath(os.path.join(output_dir, f"{ticker_clean}_test.csv"))
     
-    # Ghi dữ liệu trực tiếp xuống ổ đĩa cục bộ
     df_filtered.to_csv(full_path, index=False)
     df_train.to_csv(train_path, index=False)
     df_val.to_csv(val_path, index=False)
@@ -141,7 +142,7 @@ def process_and_split_pipeline(df: pd.DataFrame, start_year: int, end_year: int,
 # ═════════════════════════════════════════════════════════════════
 
 st.title("🛡️ Machine Learning Pipeline — Phase 1: Advanced Data Engine")
-st.markdown("Hệ thống nạp dữ liệu thông minh, tích hợp tự động trích xuất chỉ báo đặc trưng kỹ thuật, lọc thời gian và phân chia Dataset.")
+st.markdown("Hệ thống nạp dữ liệu thông minh, tự động trích xuất chỉ báo kỹ thuật, phân tích mật độ phân phối hằng năm và phân tách dữ liệu chống quá khớp.")
 st.markdown("---")
 
 # Cấu hình thanh Sidebar
@@ -165,12 +166,10 @@ start_yr, end_yr = st.sidebar.slider(
 )
 
 st.sidebar.markdown("**3. Phân chia tỷ lệ Dataset (Time-Series Split):**")
-# Sử dụng 2 thanh trượt độc lập, tự động điều chỉnh logic tổng không vượt quá 100%
 train_pct = st.sidebar.slider("Tỷ Lệ Huấn Luyện (Train Size):", min_value=0.40, max_value=0.90, value=0.70, step=0.05)
 val_pct = st.sidebar.slider("Tỷ Lệ Kiểm Định (Validation Size):", min_value=0.05, max_value=0.30, value=0.15, step=0.05)
 test_pct = round(1.0 - train_pct - val_pct, 2)
 
-# Hiển thị phân bổ trực quan cho lập trình viên theo dõi
 if test_pct < 0:
     st.sidebar.error(f"❌ Tổng tỷ lệ vượt quá 100% ({int((train_pct + val_pct)*100)}%). Hãy giảm bớt tỷ lệ Train hoặc Validation.")
 else:
@@ -182,7 +181,6 @@ generate_report = st.sidebar.checkbox("Tự động sinh báo cáo ydata-profili
 
 trigger_pipeline = st.sidebar.button("🚀 KÍCH HOẠT PHASE 1 PIPELINE", use_container_width=True, disabled=(test_pct < 0))
 
-# Khởi tạo trạng thái bộ nhớ đệm Streamlit (session_state) để lưu dữ liệu khi render tab nâng cao
 if 'data_cache' not in st.session_state:
     st.session_state['data_cache'] = None
 
@@ -205,17 +203,17 @@ if trigger_pipeline:
                 df=df_processed, start_year=start_yr, end_year=end_yr, train_ratio=train_pct, val_ratio=val_pct, ticker=ticker_input
             )
             
-            # Lưu trữ vào session_state
             st.session_state['data_cache'] = {
                 "df_filtered": df_filtered, "df_train": df_train, "df_val": df_val, "df_test": df_test,
-                "paths": paths, "ticker": ticker_input.strip().upper(), "test_pct": test_pct
+                "paths": paths, "ticker": ticker_input.strip().upper(), "test_pct": test_pct,
+                "train_pct": train_pct, "val_pct": val_pct
             }
             st.balloons()
             
         except Exception as e:
             st.error(f"❌ Pipeline gặp lỗi hệ thống: {str(e)}")
 
-# Đọc dữ liệu từ bộ nhớ trạng thái để hiển thị lên UI
+# Đọc và hiển thị dữ liệu từ Session State
 if st.session_state['data_cache'] is not None:
     cache = st.session_state['data_cache']
     
@@ -238,19 +236,20 @@ if st.session_state['data_cache'] is not None:
         st.download_button(label="🎯 Tải file Test CSV", data=cache['df_test'].to_csv(index=False), file_name=f"{cache['ticker']}_test.csv", mime="text/csv")
         
     st.markdown("---")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Tổng Số Phiên Thống Kê", f"{len(cache['df_filtered']):,} dòng", "100%")
-    c2.metric("Tập Huấn Luyện (Train)", f"{len(cache['df_train']):,} dòng", f"{train_pct*100:.0f}%")
-    c3.metric("Tập Kiểm Định (Validation)", f"{len(cache['df_val']):,} dòng", f"{val_pct*100:.0f}%")
-    c4.metric("Tập Kiểm Thử (Test)", f"{len(cache['df_test']):,} dòng", f"{cache['test_pct']*100:.0f}%")
+    metric_c1, metric_c2, metric_c3, metric_c4 = st.columns(4)
+    metric_c1.metric("Tổng Số Phiên Thống Kê", f"{len(cache['df_filtered']):,} dòng", "100%")
+    metric_c2.metric("Tập Huấn Luyện (Train)", f"{len(cache['df_train']):,} dòng", f"{cache['train_pct']*100:.0f}%")
+    metric_c3.metric("Tập Kiểm Định (Validation)", f"{len(cache['df_val']):,} dòng", f"{cache['val_pct']*100:.0f}%")
+    metric_c4.metric("Tập Kiểm Thử (Test)", f"{len(cache['df_test']):,} dòng", f"{cache['test_pct']*100:.0f}%")
     
-    # Thiết lập cấu trúc các Tab đầu ra trực quan
+    # Khởi tạo thanh Tab điều khiển dữ liệu và EDA nâng cao
     data_tabs = st.tabs([
         "📋 Toàn Bộ Dataset Sau Lọc", 
         "🧠 Tập Huấn Luyện (Train)", 
         "🧪 Tập Kiểm Định (Validation)",
         "🎯 Tập Kiểm Thử (Test)", 
-        "🧬 Báo cáo Tự động ydata-profiling"
+        "📈 🛠️ Phân Phối Hằng Năm & Mốc Thăm Dò EDA",
+        "🧬 Báo cáo Ydata-Profiling"
     ])
     
     with data_tabs[0]:
@@ -258,24 +257,92 @@ if st.session_state['data_cache'] is not None:
         st.dataframe(cache['df_filtered'], use_container_width=True)
         
     with data_tabs[1]:
-        st.caption(f"Dữ liệu dùng để huấn luyện mô hình (Từ ngày {cache['df_train']['Date'].min().date()} đến {cache['df_train']['Date'].max().date()})")
         st.dataframe(cache['df_train'], use_container_width=True)
         
     with data_tabs[2]:
-        st.caption(f"Dữ liệu dùng để tối ưu siêu tham số & chống quá khớp (Từ ngày {cache['df_val']['Date'].min().date()} đến {cache['df_val']['Date'].max().date()})")
         st.dataframe(cache['df_val'], use_container_width=True)
         
     with data_tabs[3]:
-        st.caption(f"Dữ liệu out-of-sample dùng để chấm điểm kiểm thử cuối cùng (Từ ngày {cache['df_test']['Date'].min().date()} đến {cache['df_test']['Date'].max().date()})")
         st.dataframe(cache['df_test'], use_container_width=True)
         
     with data_tabs[4]:
+        st.subheader(f"🔍 Khám Phá Mật Độ Phân Phối Hằng Năm — Asset: {cache['ticker']}")
+        st.markdown("Bóc tách cấu trúc số lượng mẫu thực tế theo từng năm tài chính để xác định các mốc phân tích chiến lược.")
+        
+        # Thiết lập logic phân tích phân phối hằng năm
+        df_eda = cache['df_filtered'].copy()
+        df_eda['Year_Label'] = df_eda['Date'].dt.year
+        
+        annual_stats = df_eda.groupby('Year_Label').agg(
+            Volume_Samples=('Close', 'count'),
+            Avg_Close=('Close', 'mean'),
+            Max_Close=('Close', 'max'),
+            Min_Close=('Close', 'min')
+        ).reset_index()
+        
+        eda_col1, eda_col2 = st.columns([3, 2])
+        with eda_col1:
+            fig_annual = go.Figure()
+            fig_annual.add_trace(go.Bar(
+                x=annual_stats['Year_Label'].astype(str), y=annual_stats['Volume_Samples'],
+                text=annual_stats['Volume_Samples'], textposition='auto',
+                marker_color='#1E88E5', name='Số phiên giao dịch'
+            ))
+            fig_annual.update_layout(
+                xaxis_title="Năm", yaxis_title="Tổng số phiên (Kích thước mẫu)",
+                template="plotly_white", height=340, margin=dict(l=10, r=10, t=10, b=10)
+            )
+            st.plotly_chart(fig_annual, use_container_width=True)
+            
+        with eda_col2:
+            annual_display = annual_stats.copy()
+            annual_display['Avg_Close'] = annual_display['Avg_Close'].round(2)
+            annual_display.columns = ['Năm tài chính', 'Số lượng phiên', 'Giá Đóng Cửa TB', 'Giá Đỉnh Cao Nhất', 'Giá Đáy Thấp Nhất']
+            st.dataframe(annual_display.set_index('Năm tài chính'), use_container_width=True)
+            
+        # Tự động gợi ý các điểm mốc thăm dò (Data Drift Evaluation)
+        st.markdown("---")
+        st.markdown("### 🗓️ Đề Xuất Các Mốc Thời Gian Thăm Dò Dữ Liệu (Time-Series Milestones)")
+        st.markdown("Hệ thống tự động đề xuất 3 mốc thời gian dựa trên phân phối lịch sử nhằm mục đích kiểm soát phân phối xác suất và phát hiện rò rỉ hoặc lệch pha dữ liệu:")
+        
+        years_available = sorted(df_eda['Year_Label'].unique())
+        if len(years_available) >= 1:
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.info(f"**📍 Mốc 1: Khởi Nguyên Baseline**\n"
+                        f"* **Thời gian:** Năm {years_available[0]} - {years_available[min(1, len(years_available)-1)]}\n"
+                        f"* **Mục tiêu thăm dò:** Thiết lập phân phối nền, đo lường các đặc trưng tĩnh ban đầu.")
+            with m2:
+                mid_idx = len(years_available) // 2
+                st.success(f"**📍 Mốc 2: Biến Động Trung Hạn**\n"
+                           f"* **Thời gian:** Năm {years_available[mid_idx]}\n"
+                           f"* **Mục tiêu thăm dò:** Đánh giá độ lệch (Skewness) và tìm kiếm sự xuất hiện của Outliers do khủng hoảng hoặc chu kỳ kinh tế.")
+            with m3:
+                st.warning(f"**📍 Mốc 3: Cận Vệ Hiện Tại (Data Drift)**\n"
+                           f"* **Thời gian:** Năm {years_available[-1]}\n"
+                           f"* **Mục tiêu thăm dò:** Đo lường độ dịch chuyển phân phối giá hiện tại so với quá khứ nhằm kiểm chứng độ tin cậy của chỉ báo kỹ thuật.")
+                
+            # Đi sâu phân tích Histogram mật độ giá của một năm được lựa chọn độc lập
+            st.markdown("---")
+            selected_year = st.selectbox("🎯 Đi sâu vào phân phối phân vị (Price Histogram) của riêng năm:", years_available, index=len(years_available)-1)
+            df_single_year = df_eda[df_eda['Year_Label'] == selected_year]
+            
+            fig_hist = go.Figure()
+            fig_hist.add_trace(go.Histogram(x=df_single_year['Close'], nbinsx=30, marker_color='#5E35B1', opacity=0.8))
+            fig_hist.update_layout(
+                title=f"Biểu đồ phân phối mật độ giá (Price Density Histogram) năm {selected_year}",
+                xaxis_title="Vùng Giá Đóng Cửa (Close)", yaxis_title="Số lượng phiên xuất hiện",
+                template="plotly_white", height=300
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+    with data_tabs[5]:
         st.subheader("Báo Cáo Khai Phá Dữ Liệu Tự Động Toàn Diện (Automated EDA)")
         if generate_report:
-            with st.spinner("📊 Đang phân tích ma trận dữ liệu và xây dựng báo cáo ydata-profiling..."):
+            with st.spinner("📊 Đang xây dựng cấu trúc báo cáo ydata-profiling chuyên sâu..."):
                 profile = ProfileReport(cache['df_filtered'], title=f"EDA Report: {cache['ticker']}", explorative=True, minimal=False)
                 st_profile_report(profile)
         else:
-            st.info("💡 Bạn chưa tích chọn tính năng này. Hãy tích vào ô 'Tự động sinh báo cáo ydata-profiling chuyên sâu' ở thanh Sidebar bên trái và ấn nút khởi chạy để quét dữ liệu nâng cao.")
+            st.info("💡 Tính năng sinh báo cáo nâng cao đang tắt. Hãy tích chọn 'Tự động sinh báo cáo ydata-profiling chuyên sâu' tại Sidebar và bấm kích hoạt lại.")
 else:
-    st.info("💡 Hệ thống đang sẵn sàng. Hãy điều chỉnh cấu hình ở Sidebar bên trái và bấm nút kích hoạt.")
+    st.info("💡 Hệ thống đang sẵn sàng. Hãy cấu hình tham số đầu vào ở thanh Sidebar bên trái và ấn nút khởi chạy.")
